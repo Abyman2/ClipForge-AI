@@ -1,0 +1,15 @@
+# Pyrefly Configuration for ClipForge AI
+# Directs the Pyrefly type checker & language server to query the local virtual environment.
+
+python-interpreter-path = ".venv/Scripts/python.exe"
+search-path = ["."]
+project-includes = ["clipforge/**", "tests/**"]
+project-excludes = [
+    ".venv/**",
+    "frontend/**",
+    "clipforge-data/**",
+    "tools/**",
+    "models/**",
+    "fixtures/**",
+]
+

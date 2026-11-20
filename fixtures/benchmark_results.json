@@ -1,0 +1,16 @@
+{
+  "model": "tiny",
+  "device": "cpu",
+  "compute_type": "int8",
+  "cpu_threads": 4,
+  "model_cache_size_mb": 74.58,
+  "audio_duration_seconds": 10.95,
+  "inference_duration_seconds": 4.041,
+  "real_time_factor": 0.369,
+  "speedup_factor": 2.71,
+  "words_transcribed": 22,
+  "language": "en",
+  "language_probability": 1.0,
+  "raw_text": "Welcome to Clip4GI, the local desktop video clipping application. We extract high impact moments and vertical video clips with zero cloud dependencies.",
+  "free_disk_space_after_gb": 9.63
+}

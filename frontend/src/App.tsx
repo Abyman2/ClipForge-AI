@@ -40,7 +40,7 @@ export const App: React.FC = () => {
         <Sidebar currentTab={currentTab} onTabChange={setCurrentTab} />
 
         <main className="flex-1 overflow-y-auto p-8 space-y-8">
-          {currentTab === 'import' ? (
+          {currentTab === 'import' || currentTab === 'transcribe' || currentTab === 'highlights' ? (
             <VideoIngestView />
           ) : (
             <>
@@ -49,7 +49,7 @@ export const App: React.FC = () => {
                 <div className="max-w-2xl relative z-10 space-y-4">
                   <div className="inline-flex items-center space-x-2 px-2.5 py-1 rounded-full bg-amber-400/10 border border-amber-400/20 text-amber-400 text-xs font-medium">
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Stage 2.2 — Video Ingestion & FFmpeg Layer Active</span>
+                    <span>Stage 2.4 — AI Highlight Discovery & Boundary Validation Active</span>
                   </div>
                   <h1 className="text-3xl font-extrabold tracking-tight text-white">
                     Transform Long-Form Content Into Viral 9:16 Shorts

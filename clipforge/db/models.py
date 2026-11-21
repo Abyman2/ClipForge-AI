@@ -83,6 +83,11 @@ class ClipModel(BaseModel):
     hook: str = ""
     description: str = ""
     rationale: str = ""
+    category: str = "general"
     engagement_score: float = 0.0
+    validation_status: str = "VALID"
+    validation_reason: str = ""
+    selected: bool = False
     status: str = "DISCOVERED"
+    created_at: Optional[datetime] = None
 

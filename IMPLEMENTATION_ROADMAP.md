@@ -58,9 +58,15 @@ flowchart LR
     - API endpoints: `POST /api/projects/{id}/transcribe`, `GET /api/projects/{id}/transcription-status`, `GET /api/projects/{id}/transcript`.
     - Frontend transcript inspector with language detection badge, segment timestamps, and interactive word badge inspector.
     - Verified real-speech benchmark: RTF 0.369x (2.71x faster than real time), 74.58 MB model size, 9.63 GB free disk space.
-  - [ ] **Stage 2.4: AI Highlight Discovery & Validation Engine (NEXT STAGE):**
-    - External LLM integration requesting candidate clips defined by start/end word indices.
-    - 4-rule deterministic boundary validator.
+  - [x] **Stage 2.4: AI Highlight Discovery & Validation Engine (COMPLETED):**
+    - External LLM integration requesting candidate clips defined by start/end word indices (OpenAI & Anthropic protocols).
+    - Offline deterministic heuristic analyzer fallback when no external API key is configured.
+    - 4-rule deterministic boundary validator (bounds integrity, sentence boundary snapping, 15s–90s duration constraints, internal dead-air thresholding).
+    - Overlapping candidate deduplication (IoU) and explainable multi-factor ranking.
+    - Atomic disk persistence (`candidates.json`) and SQLite database persistence (`clips`).
+    - Interactive React review UI with category badges, hook callouts, rationale, timestamps, and selection toggles.
+    - 59 automated unit and integration tests passing.
+  - [ ] **Stage 2.5: Video Cropping, Reframing & SubStation Alpha Captions (NEXT STAGE):**
 
 ---
 

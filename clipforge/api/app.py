@@ -10,6 +10,7 @@ from clipforge.db.session import init_db, reconcile_interrupted_jobs
 from clipforge.api.routes.health import router as health_router
 from clipforge.api.routes.projects import router as projects_router
 from clipforge.api.routes.transcription import router as transcription_router
+from clipforge.api.routes.highlights import router as highlights_router
 
 
 @asynccontextmanager
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api")
     app.include_router(projects_router, prefix="/api")
     app.include_router(transcription_router, prefix="/api")
+    app.include_router(highlights_router, prefix="/api")
 
     # Root redirect / friendly ping
     @app.get("/")

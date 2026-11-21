@@ -69,7 +69,11 @@ CREATE TABLE IF NOT EXISTS clips (
     hook TEXT DEFAULT '',
     description TEXT DEFAULT '',
     rationale TEXT DEFAULT '',
+    category TEXT DEFAULT 'general',
     engagement_score REAL DEFAULT 0.0,
+    validation_status TEXT NOT NULL DEFAULT 'VALID',
+    validation_reason TEXT DEFAULT '',
+    selected INTEGER DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'DISCOVERED',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -130,6 +134,19 @@ def init_db(db_path: Path = None) -> None:
             if col_name not in existing_transcript_cols:
                 cursor.execute(f"ALTER TABLE transcripts ADD COLUMN {col_name} {col_type};")
 
+        # Migrate existing columns for clips table if missing
+        cursor.execute("PRAGMA table_info(clips);")
+        existing_clip_cols = {row[1] for row in cursor.fetchall()}
+        clip_column_defs = {
+            "category": "TEXT DEFAULT 'general'",
+            "validation_status": "TEXT DEFAULT 'VALID'",
+            "validation_reason": "TEXT DEFAULT ''",
+            "selected": "INTEGER DEFAULT 0",
+        }
+        for col_name, col_type in clip_column_defs.items():
+            if col_name not in existing_clip_cols:
+                cursor.execute(f"ALTER TABLE clips ADD COLUMN {col_name} {col_type};")
+
         conn.commit()
         logger.info(f"Initialized database at {target_path} (Journal Mode: {wal_result[0] if wal_result else 'WAL'})")
     finally:
@@ -151,50 +168,82 @@ def get_db_connection(db_path: Path = None) -> Generator[sqlite3.Connection, Non
 def reconcile_interrupted_jobs(db_path: Optional[Path] = None) -> int:
     """Reconcile stale in-progress jobs upon application startup.
 
-    Any project left in TRANSCRIBING status from a previous process (e.g. server restart)
-    is marked as FAILED with an explicit error record, enabling clean retry.
+    Any project left in TRANSCRIBING or DISCOVERING_HIGHLIGHTS status from a previous
+    process (e.g. server restart) is safely recovered, enabling clean retry.
     Returns the count of reconciled projects.
     """
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM projects WHERE status = 'TRANSCRIBING';")
-        stale_rows = cursor.fetchall()
-        if not stale_rows:
-            return 0
-
-        stale_ids = [row["id"] for row in stale_rows]
         now_iso = datetime.utcnow().isoformat()
-        cursor.execute(
-            """
-            UPDATE projects 
-            SET status = 'FAILED', updated_at = ? 
-            WHERE status = 'TRANSCRIBING';
-            """,
-            (now_iso,),
-        )
-        for proj_id in stale_ids:
+        total_reconciled = 0
+
+        # 1. Stale transcription jobs
+        cursor.execute("SELECT id FROM projects WHERE status = 'TRANSCRIBING';")
+        stale_transcribing = cursor.fetchall()
+        if stale_transcribing:
+            stale_ids = [row["id"] for row in stale_transcribing]
             cursor.execute(
                 """
-                UPDATE transcripts 
-                SET status = 'FAILED' 
-                WHERE project_id = ? AND status != 'COMPLETED';
+                UPDATE projects 
+                SET status = 'FAILED', updated_at = ? 
+                WHERE status = 'TRANSCRIBING';
                 """,
-                (proj_id,),
+                (now_iso,),
             )
+            for proj_id in stale_ids:
+                cursor.execute(
+                    """
+                    UPDATE transcripts 
+                    SET status = 'FAILED' 
+                    WHERE project_id = ? AND status != 'COMPLETED';
+                    """,
+                    (proj_id,),
+                )
+                cursor.execute(
+                    """
+                    UPDATE jobs 
+                    SET status = 'FAILED', 
+                        error_message = 'Transcription was interrupted by server restart',
+                        finished_at = ?
+                    WHERE project_id = ? AND status IN ('PENDING', 'RUNNING');
+                    """,
+                    (now_iso, proj_id),
+                )
+            logger.warning(
+                f"Startup reconciliation: marked {len(stale_ids)} interrupted transcription project(s) as FAILED: {stale_ids}"
+            )
+            total_reconciled += len(stale_ids)
+
+        # 2. Stale highlight discovery jobs (restore to TRANSCRIBED so transcript is preserved)
+        cursor.execute("SELECT id FROM projects WHERE status = 'DISCOVERING_HIGHLIGHTS';")
+        stale_highlights = cursor.fetchall()
+        if stale_highlights:
+            stale_hl_ids = [row["id"] for row in stale_highlights]
             cursor.execute(
                 """
-                UPDATE jobs 
-                SET status = 'FAILED', 
-                    error_message = 'Transcription was interrupted by server restart',
-                    finished_at = ?
-                WHERE project_id = ? AND status IN ('PENDING', 'RUNNING');
+                UPDATE projects 
+                SET status = 'TRANSCRIBED', updated_at = ? 
+                WHERE status = 'DISCOVERING_HIGHLIGHTS';
                 """,
-                (now_iso, proj_id),
+                (now_iso,),
             )
+            for proj_id in stale_hl_ids:
+                cursor.execute(
+                    """
+                    UPDATE jobs 
+                    SET status = 'FAILED', 
+                        error_message = 'Highlight discovery was interrupted by server restart',
+                        finished_at = ?
+                    WHERE project_id = ? AND stage = 'HIGHLIGHTS' AND status IN ('PENDING', 'RUNNING');
+                    """,
+                    (now_iso, proj_id),
+                )
+            logger.warning(
+                f"Startup reconciliation: restored {len(stale_hl_ids)} interrupted highlight discovery project(s) to TRANSCRIBED: {stale_hl_ids}"
+            )
+            total_reconciled += len(stale_hl_ids)
+
         conn.commit()
-        logger.warning(
-            f"Startup reconciliation: marked {len(stale_ids)} interrupted project(s) as FAILED: {stale_ids}"
-        )
-        return len(stale_ids)
+        return total_reconciled
 
 

@@ -17,6 +17,7 @@ import {
   Languages,
 } from 'lucide-react';
 import { Project, Transcript, TranscriptionStatus } from '../types';
+import { HighlightCandidatesView } from '../components/HighlightCandidatesView';
 
 interface VideoIngestViewProps {
   onProjectSelected?: (project: Project) => void;
@@ -635,6 +636,20 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
                   </div>
                 </div>
               )}
+
+              {/* Highlight Discovery and Candidate Review Section (Stage 2.4) */}
+              {selectedProject &&
+                (selectedProject.status === 'TRANSCRIBED' ||
+                  selectedProject.status === 'HIGHLIGHTS_READY' ||
+                  transcript !== null) && (
+                  <div className="pt-2">
+                    <HighlightCandidatesView
+                      projectId={selectedProject.id}
+                      projectStatus={selectedProject.status}
+                      onStatusChange={fetchProjects}
+                    />
+                  </div>
+                )}
             </div>
           ) : (
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-12 text-center text-slate-500">

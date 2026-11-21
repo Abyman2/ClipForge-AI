@@ -86,4 +86,35 @@ export interface TranscriptionStatus {
   is_running: boolean;
 }
 
+export interface Clip {
+  id: string;
+  project_id: string;
+  start_word_index: number;
+  end_word_index: number;
+  start_time: number;
+  end_time: number;
+  title: string;
+  hook: string;
+  description: string;
+  rationale: string;
+  category: string;
+  engagement_score: number;
+  validation_status: string;
+  validation_reason: string;
+  selected: boolean;
+  status: string;
+  created_at?: string | null;
+}
+
+export interface HighlightDiscoveryStatus {
+  project_id: string;
+  status: string;
+  progress_percent: number;
+  candidate_count: number;
+  mode: string;
+  error: string | null;
+  is_running: boolean;
+}
+
+
 

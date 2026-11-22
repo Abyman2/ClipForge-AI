@@ -6,7 +6,7 @@ to allow non-blocking concurrent reads while background workers write progress.
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator, Optional
 from clipforge.core.config import settings
@@ -92,9 +92,9 @@ CREATE TABLE IF NOT EXISTS export_assets (
 """
 
 
-def init_db(db_path: Path = None) -> None:
+def init_db(db_path: Optional[Path] = None) -> None:
     """Initialize the SQLite database with WAL mode and create base schema."""
-    target_path = db_path or settings.db_path
+    target_path: Path = db_path or settings.db_path
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(target_path, timeout=30.0)
@@ -154,9 +154,9 @@ def init_db(db_path: Path = None) -> None:
 
 
 @contextmanager
-def get_db_connection(db_path: Path = None) -> Generator[sqlite3.Connection, None, None]:
+def get_db_connection(db_path: Optional[Path] = None) -> Generator[sqlite3.Connection, None, None]:
     """Context manager for SQLite connections with row_factory enabled."""
-    target_path = db_path or settings.db_path
+    target_path: Path = db_path or settings.db_path
     conn = sqlite3.connect(target_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
@@ -172,9 +172,10 @@ def reconcile_interrupted_jobs(db_path: Optional[Path] = None) -> int:
     process (e.g. server restart) is safely recovered, enabling clean retry.
     Returns the count of reconciled projects.
     """
-    with get_db_connection(db_path) as conn:
+    target_path: Path = db_path or settings.db_path
+    with get_db_connection(target_path) as conn:
         cursor = conn.cursor()
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
         total_reconciled = 0
 
         # 1. Stale transcription jobs

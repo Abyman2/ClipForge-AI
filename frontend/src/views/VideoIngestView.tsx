@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   UploadCloud,
   FileVideo,
@@ -13,20 +13,25 @@ import {
   HardDrive,
   RefreshCw,
   Sparkles,
-  FileText,
-  Languages,
+  ArrowRight,
 } from 'lucide-react';
-import { Project, Transcript, TranscriptionStatus } from '../types';
-import { HighlightCandidatesView } from '../components/HighlightCandidatesView';
+import { Project } from '../types';
 
 interface VideoIngestViewProps {
-  onProjectSelected?: (project: Project) => void;
+  projects: Project[];
+  selectedProject: Project | null;
+  onSelectProject: (project: Project) => void;
+  onProjectsChange: () => void;
+  onNavigateTab?: (tab: string) => void;
 }
 
-export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+export const VideoIngestView: React.FC<VideoIngestViewProps> = ({
+  projects,
+  selectedProject,
+  onSelectProject,
+  onProjectsChange,
+  onNavigateTab,
+}) => {
   const [uploading, setUploading] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [uploadStatus, setUploadStatus] = useState<string>('');
@@ -34,97 +39,8 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [extractingAudio, setExtractingAudio] = useState<boolean>(false);
   const [audioResult, setAudioResult] = useState<string | null>(null);
-  const [transcribing, setTranscribing] = useState<boolean>(false);
-  const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
-  const [transcript, setTranscript] = useState<Transcript | null>(null);
-  const [selectedWordIndex, setSelectedWordIndex] = useState<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const fetchTranscript = async (projectId: string) => {
-    try {
-      const res = await fetch(`/api/projects/${projectId}/transcript`);
-      if (res.ok) {
-        const data: Transcript = await res.json();
-        setTranscript(data);
-      } else {
-        setTranscript(null);
-      }
-    } catch {
-      setTranscript(null);
-    }
-  };
-
-  const pollTranscription = (projectId: string) => {
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/projects/${projectId}/transcription-status`);
-        if (res.ok) {
-          const status: TranscriptionStatus = await res.json();
-          setTranscriptionStatus(status);
-          if (status.status === 'TRANSCRIBED') {
-            clearInterval(interval);
-            setTranscribing(false);
-            fetchTranscript(projectId);
-            fetchProjects();
-          } else if (status.status === 'FAILED') {
-            clearInterval(interval);
-            setTranscribing(false);
-            setError(status.error || 'Transcription failed');
-            fetchProjects();
-          }
-        }
-      } catch (e) {
-        clearInterval(interval);
-        setTranscribing(false);
-      }
-    }, 1500);
-  };
-
-  const handleTranscribe = async (projectId: string) => {
-    try {
-      setTranscribing(true);
-      setError(null);
-      setTranscript(null);
-      setTranscriptionStatus(null);
-      const res = await fetch(`/api/projects/${projectId}/transcribe`, { method: 'POST' });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || 'Failed to start transcription');
-      }
-      pollTranscription(projectId);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Transcription failed';
-      setError(message);
-      setTranscribing(false);
-    }
-  };
-
-  const fetchProjects = async () => {
-    try {
-      setLoading(true);
-      const res = await fetch('/api/projects');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: Project[] = await res.json();
-      setProjects(data);
-      if (data.length > 0 && !selectedProject) {
-        setSelectedProject(data[0]);
-        if (data[0].status === 'TRANSCRIBED') {
-          fetchTranscript(data[0].id);
-        }
-      }
-      setError(null);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to load projects';
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchProjects();
-  }, []);
 
   const handleUploadFile = (file: File) => {
     const validExtensions = ['.mp4', '.mov', '.mkv', '.webm'];
@@ -162,11 +78,11 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
       if (xhr.status === 201) {
         try {
           const newProject: Project = JSON.parse(xhr.responseText);
-          setProjects((prev) => [newProject, ...prev]);
-          setSelectedProject(newProject);
+          onProjectsChange();
+          onSelectProject(newProject);
           setUploadStatus('Video successfully ingested!');
         } catch {
-          fetchProjects();
+          onProjectsChange();
         }
       } else {
         try {
@@ -191,10 +107,7 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
     try {
       const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setProjects((prev) => prev.filter((p) => p.id !== id));
-      if (selectedProject?.id === id) {
-        setSelectedProject(projects.find((p) => p.id !== id) || null);
-      }
+      onProjectsChange();
       setAudioResult(null);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to delete project';
@@ -215,13 +128,7 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
         throw new Error(data.detail || 'Audio extraction failed');
       }
       setAudioResult(`Extracted 16kHz mono WAV: ${data.audio_file_path}`);
-      // Refresh current project
-      const projRes = await fetch(`/api/projects/${projectId}`);
-      if (projRes.ok) {
-        const updated = await projRes.json();
-        setSelectedProject(updated);
-        setProjects((prev) => prev.map((p) => (p.id === projectId ? updated : p)));
-      }
+      onProjectsChange();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Audio extraction failed';
       setError(message);
@@ -258,11 +165,10 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
         </div>
 
         <button
-          onClick={fetchProjects}
-          disabled={loading}
+          onClick={onProjectsChange}
           className="flex items-center space-x-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition-colors"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className="w-3.5 h-3.5" />
           <span>Refresh</span>
         </button>
       </div>
@@ -389,10 +295,12 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
                 <div className="flex items-center space-x-2">
                   <span
                     className={`text-xs px-2.5 py-1 rounded-full font-semibold border ${
-                      selectedProject.status === 'AUDIO_READY'
+                      selectedProject.status === 'AUDIO_READY' || selectedProject.status === 'TRANSCRIBED' || selectedProject.status === 'HIGHLIGHTS_READY'
                         ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
                         : selectedProject.status === 'INGESTED'
                         ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                        : selectedProject.status === 'FAILED'
+                        ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
                         : 'bg-slate-800 border-slate-700 text-slate-400'
                     }`}
                   >
@@ -502,152 +410,26 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
                 </button>
               </div>
 
-              {/* Speech-to-Text Transcription Control */}
-              <div className="p-4 rounded-xl bg-slate-850/80 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-9 h-9 rounded-lg bg-amber-400/10 text-amber-400 border border-amber-400/20 flex items-center justify-center">
-                      <FileText className="w-5 h-5" />
+              {/* Next Step Shortcut to Transcription */}
+              {selectedProject.has_audio &&
+                (selectedProject.status === 'AUDIO_READY' ||
+                  selectedProject.status === 'TRANSCRIBED' ||
+                  selectedProject.status === 'HIGHLIGHTS_READY') &&
+                onNavigateTab && (
+                  <div className="p-4 rounded-xl bg-amber-400/10 border border-amber-400/20 flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-bold text-amber-300">Audio Extracted & Ready</div>
+                      <p className="text-[11px] text-slate-400">
+                        Proceed to the dedicated Transcription workspace to run faster-whisper speech-to-text.
+                      </p>
                     </div>
-                    <div>
-                      <div className="flex items-center space-x-2">
-                        <span className="text-sm font-semibold text-slate-200">Speech-to-Text Transcription</span>
-                        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-400 font-mono">
-                          tiny • CPU int8
-                        </span>
-                      </div>
-                      <div className="text-xs text-slate-400">
-                        Local faster-whisper CTranslate2 with word-level timestamps
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => handleTranscribe(selectedProject.id)}
-                    disabled={
-                      transcribing ||
-                      (selectedProject.status !== 'AUDIO_READY' &&
-                        selectedProject.status !== 'TRANSCRIBED' &&
-                        selectedProject.status !== 'FAILED')
-                    }
-                    className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center space-x-2 transition-colors ${
-                      transcribing ||
-                      (selectedProject.status !== 'AUDIO_READY' &&
-                        selectedProject.status !== 'TRANSCRIBED' &&
-                        selectedProject.status !== 'FAILED')
-                        ? 'bg-slate-800 text-slate-600 cursor-not-allowed'
-                        : 'bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-md shadow-amber-400/10'
-                    }`}
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${transcribing ? 'animate-spin' : ''}`} />
-                    <span>
-                      {transcribing
-                        ? 'Transcribing Speech...'
-                        : selectedProject.status === 'TRANSCRIBED'
-                        ? 'Re-transcribe Audio'
-                        : selectedProject.status === 'FAILED'
-                        ? 'Retry Transcription'
-                        : 'Transcribe Audio'}
-                    </span>
-                  </button>
-                </div>
-
-                {transcribing && (
-                  <div className="p-3 rounded-lg bg-amber-400/5 border border-amber-400/20 flex items-center space-x-3 text-xs text-amber-300">
-                    <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
-                    <span>
-                      {transcriptionStatus?.is_running
-                        ? 'Processing speech using 4 CPU threads. Generating word timestamps...'
-                        : 'Initializing faster-whisper CTranslate2 model (tiny int8)...'}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Word-Level Transcript Viewer */}
-              {transcript && (
-                <div className="p-5 rounded-xl bg-slate-850/80 border border-slate-800 space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-                    <div className="flex items-center space-x-3">
-                      <div className="flex items-center space-x-1.5 text-xs text-slate-300 font-mono">
-                        <Languages className="w-4 h-4 text-amber-400" />
-                        <span>Language:</span>
-                        <span className="font-bold uppercase text-amber-400">
-                          {transcript.language} ({(transcript.language_probability * 100).toFixed(0)}%)
-                        </span>
-                      </div>
-                      <span className="text-slate-600">•</span>
-                      <div className="text-xs text-slate-300 font-mono">
-                        Words: <span className="font-bold text-slate-100">{transcript.words.length}</span>
-                      </div>
-                      <span className="text-slate-600">•</span>
-                      <div className="text-xs text-slate-300 font-mono">
-                        Segments: <span className="font-bold text-slate-100">{transcript.segments.length}</span>
-                      </div>
-                    </div>
-
-                    {selectedWordIndex !== null && transcript.words[selectedWordIndex] && (
-                      <div className="text-xs font-mono text-amber-400 bg-amber-400/10 px-2.5 py-1 rounded border border-amber-400/20">
-                        Word #{selectedWordIndex}: "{transcript.words[selectedWordIndex].word.trim()}" [
-                        {transcript.words[selectedWordIndex].start.toFixed(2)}s –{' '}
-                        {transcript.words[selectedWordIndex].end.toFixed(2)}s] (
-                        {(transcript.words[selectedWordIndex].probability * 100).toFixed(0)}% conf)
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Segments and Words display */}
-                  <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
-                    {transcript.segments.map((seg) => (
-                      <div
-                        key={seg.id}
-                        className="p-3 rounded-lg bg-slate-900/60 border border-slate-800/60 space-y-1.5 text-xs"
-                      >
-                        <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono">
-                          <span>
-                            [{formatDuration(seg.start)} – {formatDuration(seg.end)}]
-                          </span>
-                          <span>Seg #{seg.id}</span>
-                        </div>
-
-                        <div className="flex flex-wrap gap-1 leading-relaxed">
-                          {seg.words.map((w) => {
-                            const isSelected = selectedWordIndex === w.index;
-                            return (
-                              <button
-                                key={w.index}
-                                onClick={() => setSelectedWordIndex(isSelected ? null : w.index)}
-                                title={`#${w.index} [${w.start.toFixed(2)}s - ${w.end.toFixed(2)}s] (${(
-                                  w.probability * 100
-                                ).toFixed(0)}%)`}
-                                className={`px-1.5 py-0.5 rounded text-xs transition-colors font-sans ${
-                                  isSelected
-                                    ? 'bg-amber-400 text-slate-950 font-bold shadow-sm shadow-amber-400/20'
-                                    : 'hover:bg-slate-800 text-slate-300 hover:text-white'
-                                }`}
-                              >
-                                {w.word}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Highlight Discovery and Candidate Review Section (Stage 2.4) */}
-              {selectedProject &&
-                (selectedProject.status === 'TRANSCRIBED' ||
-                  selectedProject.status === 'HIGHLIGHTS_READY' ||
-                  transcript !== null) && (
-                  <div className="pt-2">
-                    <HighlightCandidatesView
-                      projectId={selectedProject.id}
-                      projectStatus={selectedProject.status}
-                      onStatusChange={fetchProjects}
-                    />
+                    <button
+                      onClick={() => onNavigateTab('transcribe')}
+                      className="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-semibold text-xs transition-colors shadow-sm"
+                    >
+                      <span>Go to Transcription</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 )}
             </div>
@@ -685,25 +467,13 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
-                        setSelectedProject(proj);
+                        onSelectProject(proj);
                         setAudioResult(null);
-                        setSelectedWordIndex(null);
-                        if (proj.status === 'TRANSCRIBED') {
-                          fetchTranscript(proj.id);
-                        } else {
-                          setTranscript(null);
-                        }
                       }
                     }}
                     onClick={() => {
-                      setSelectedProject(proj);
+                      onSelectProject(proj);
                       setAudioResult(null);
-                      setSelectedWordIndex(null);
-                      if (proj.status === 'TRANSCRIBED') {
-                        fetchTranscript(proj.id);
-                      } else {
-                        setTranscript(null);
-                      }
                     }}
                     className={`p-4 rounded-xl border cursor-pointer transition-all ${
                       isSelected
@@ -726,7 +496,7 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
 
                       <span
                         className={`text-[10px] px-2 py-0.5 rounded font-mono ${
-                          proj.status === 'AUDIO_READY'
+                          proj.status === 'AUDIO_READY' || proj.status === 'TRANSCRIBED' || proj.status === 'HIGHLIGHTS_READY'
                             ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                             : proj.status === 'FAILED'
                             ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
@@ -746,4 +516,3 @@ export const VideoIngestView: React.FC<VideoIngestViewProps> = () => {
     </div>
   );
 };
-

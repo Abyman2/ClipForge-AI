@@ -3,12 +3,18 @@ import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { StatusCard } from './components/StatusCard';
 import { VideoIngestView } from './views/VideoIngestView';
-import { HealthDiagnostic } from './types';
+import { TranscriptionView } from './views/TranscriptionView';
+import { HighlightsView } from './views/HighlightsView';
+import { ClipStudioPlaceholderView } from './views/ClipStudioPlaceholderView';
+import { SettingsPlaceholderView } from './views/SettingsPlaceholderView';
+import { HealthDiagnostic, Project } from './types';
 import { Database, Cpu, Activity, Video, Sparkles, CheckCircle2, ArrowRight } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState('dashboard');
   const [diagnostic, setDiagnostic] = useState<HealthDiagnostic | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,8 +34,30 @@ export const App: React.FC = () => {
     }
   };
 
+  const fetchProjects = async () => {
+    try {
+      const res = await fetch('/api/projects');
+      if (res.ok) {
+        const data: Project[] = await res.json();
+        setProjects(data);
+        if (data.length > 0) {
+          setSelectedProject((prev) => {
+            if (!prev) return data[0];
+            const updated = data.find((p) => p.id === prev.id);
+            return updated || data[0];
+          });
+        } else {
+          setSelectedProject(null);
+        }
+      }
+    } catch {
+      // Ignore background refresh errors
+    }
+  };
+
   useEffect(() => {
     fetchHealth();
+    fetchProjects();
   }, []);
 
   return (
@@ -40,9 +68,48 @@ export const App: React.FC = () => {
         <Sidebar currentTab={currentTab} onTabChange={setCurrentTab} />
 
         <main className="flex-1 overflow-y-auto p-8 space-y-8">
-          {currentTab === 'import' || currentTab === 'transcribe' || currentTab === 'highlights' ? (
-            <VideoIngestView />
-          ) : (
+          {currentTab === 'import' && (
+            <VideoIngestView
+              projects={projects}
+              selectedProject={selectedProject}
+              onSelectProject={setSelectedProject}
+              onProjectsChange={fetchProjects}
+              onNavigateTab={setCurrentTab}
+            />
+          )}
+
+          {currentTab === 'transcribe' && (
+            <TranscriptionView
+              projects={projects}
+              selectedProject={selectedProject}
+              onSelectProject={setSelectedProject}
+              onProjectsChange={fetchProjects}
+              onNavigateTab={setCurrentTab}
+            />
+          )}
+
+          {currentTab === 'highlights' && (
+            <HighlightsView
+              projects={projects}
+              selectedProject={selectedProject}
+              onSelectProject={setSelectedProject}
+              onProjectsChange={fetchProjects}
+              onNavigateTab={setCurrentTab}
+            />
+          )}
+
+          {currentTab === 'editor' && (
+            <ClipStudioPlaceholderView
+              selectedProject={selectedProject}
+              onNavigateTab={setCurrentTab}
+            />
+          )}
+
+          {currentTab === 'settings' && (
+            <SettingsPlaceholderView diagnostic={diagnostic} />
+          )}
+
+          {currentTab === 'dashboard' && (
             <>
               {/* Welcome Banner */}
               <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-slate-800 p-8">
@@ -78,7 +145,7 @@ export const App: React.FC = () => {
                 <StatusCard
                   title="Backend API"
                   value={diagnostic ? diagnostic.status.toUpperCase() : (loading ? 'CONNECTING...' : 'OFFLINE')}
-                  subtitle="FastAPI / Uvicorn Service"
+                  subtitle="FastAPI / Uicorn Service"
                   icon={Activity}
                   badge={diagnostic ? `v${diagnostic.version}` : undefined}
                   badgeColor="emerald"
@@ -104,10 +171,10 @@ export const App: React.FC = () => {
 
                 <StatusCard
                   title="Pipeline Engine"
-                  value="STAGE 2.2"
-                  subtitle="Ingest & FFprobe Ready"
+                  value="STAGE 2.4"
+                  subtitle="Highlight Discovery Ready"
                   icon={CheckCircle2}
-                  badge="Stage 2.2 Active"
+                  badge="Stage 2.4 Active"
                   badgeColor="emerald"
                 />
               </div>
@@ -161,4 +228,3 @@ export const App: React.FC = () => {
     </div>
   );
 };
-

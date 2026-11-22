@@ -332,6 +332,86 @@ def test_get_failed_transcription_status_reports_error():
     status_resp = get_transcription_status(project_id)
     assert status_resp.project_id == project_id
     assert status_resp.status == "FAILED"
+    assert status_resp.phase == "FAILED"
     assert status_resp.progress_percent == 0
+    assert not status_resp.is_running
     assert status_resp.error == "Transcription was interrupted by server restart"
+
+
+def test_get_transcription_status_active_job_telemetry():
+    """Verify get_transcription_status provides phase, is_running, and timing telemetry."""
+    project_id = "proj_telemetry_test"
+    project_dir = settings.get_project_dir(project_id)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO projects (id, title, source_file_path, duration_seconds, width, height,
+                                  fps, video_codec, audio_codec, has_audio, file_size_bytes,
+                                  container_format, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                "Telemetry Project",
+                str(project_dir / "video.mp4"),
+                14.0,
+                1920,
+                1080,
+                30.0,
+                "h264",
+                "aac",
+                1,
+                2048,
+                "mp4",
+                "TRANSCRIBING",
+            ),
+        )
+        conn.commit()
+
+    active_mock = {
+        project_id: {
+            "status": "IN_PROGRESS",
+            "phase": "TRANSCRIBING",
+            "progress_percent": 70,
+            "model_cached": True,
+            "model_load_duration": 0.0,
+            "inference_duration": None,
+            "total_duration": None,
+            "word_count": 0,
+            "language": None,
+            "language_probability": None,
+            "error": None,
+        }
+    }
+
+    with patch("clipforge.api.routes.transcription._active_jobs", active_mock):
+        resp = get_transcription_status(project_id)
+        assert resp.project_id == project_id
+        assert resp.status == "IN_PROGRESS"
+        assert resp.phase == "TRANSCRIBING"
+        assert resp.model_cached is True
+        assert resp.is_running is True
+        assert resp.progress_percent == 70
+        assert resp.model_load_duration == 0.0
+
+
+def test_real_14s_sample_transcription_if_present():
+    """Verify real 14s video audio completes transcription with accurate word timestamps."""
+    real_audio_path = Path("clipforge-data/projects/648ef589-6314-4747-909b-a23d9295070a/audio_16k.wav")
+    if not real_audio_path.exists():
+        pytest.skip("Real 14s audio file not present in local workspace.")
+
+    from clipforge.media.transcribe import transcription_engine
+
+    result = transcription_engine.transcribe_file(real_audio_path)
+    assert result["word_count"] > 20
+    assert result["language"] == "en"
+    assert result["duration"] > 10.0
+    assert result["inference_duration"] < 10.0  # Must be faster than 10 seconds on this machine
+    assert len(result["words"]) == result["word_count"]
+    # Check word timestamps
+    assert result["words"][0]["start"] >= 0.0
+    assert result["words"][-1]["end"] <= 15.0
 

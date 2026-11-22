@@ -7,9 +7,10 @@ word-level timestamp indexing, language detection, and persistent disk artifacts
 import json
 import os
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from clipforge.core.config import settings
 from clipforge.core.logging import logger
@@ -24,6 +25,11 @@ class TranscriptionError(Exception):
 
 class AudioFileNotFoundError(TranscriptionError):
     """Raised when source audio file is missing or unreadable."""
+    pass
+
+
+class AudioCorruptedError(TranscriptionError):
+    """Raised when source audio file is too small or corrupted."""
     pass
 
 
@@ -58,6 +64,21 @@ class TranscriptionEngine:
             return self._model
         return self._load_model()
 
+    @property
+    def is_model_loaded(self) -> bool:
+        """Check if faster-whisper model is currently cached in memory."""
+        return self._model is not None
+
+    def get_model_status(self) -> Dict[str, Any]:
+        """Return diagnostic details of the underlying WhisperModel."""
+        return {
+            "model_size": self.model_size,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "cpu_threads": self.cpu_threads,
+            "is_loaded": self.is_model_loaded,
+        }
+
     def _load_model(self):
         """Internal loader for WhisperModel."""
         with self._lock:
@@ -88,16 +109,39 @@ class TranscriptionEngine:
         audio_path: Path,
         language: Optional[str] = None,
         vad_filter: bool = True,
+        on_progress: Optional[Callable[[str, int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """Transcribe a standardized 16kHz WAV file and extract word-level timestamps."""
+        t_total_start = time.perf_counter()
+
         if not audio_path.exists() or not audio_path.is_file():
             raise AudioFileNotFoundError(f"Audio file not found: {audio_path}")
 
-        if audio_path.stat().st_size == 0:
+        file_size = audio_path.stat().st_size
+        if file_size == 0:
             raise AudioFileNotFoundError("Audio file is empty (0 bytes).")
+        if file_size < 44:
+            raise AudioCorruptedError(f"Audio file is too small or corrupted ({file_size} bytes).")
 
+        was_cached = self.is_model_loaded
+        if on_progress:
+            on_progress("LOADING_MODEL", 35, {"model_cached": was_cached})
+
+        t_model_start = time.perf_counter()
         model = self.get_model()
+        model_load_duration = round(time.perf_counter() - t_model_start, 3)
 
+        if on_progress:
+            on_progress(
+                "TRANSCRIBING",
+                70,
+                {
+                    "model_cached": was_cached,
+                    "model_load_duration": model_load_duration,
+                },
+            )
+
+        t_infer_start = time.perf_counter()
         try:
             logger.info(f"Starting faster-whisper transcription for {audio_path.name}...")
             segments_generator, info = model.transcribe(
@@ -147,13 +191,20 @@ class TranscriptionEngine:
             lang_prob = round(float(info.language_probability), 3) if info and hasattr(info, "language_probability") else 0.0
             duration = round(float(info.duration), 2) if info and hasattr(info, "duration") else 0.0
 
+            inference_duration = round(time.perf_counter() - t_infer_start, 3)
+            total_duration = round(time.perf_counter() - t_total_start, 3)
+
             logger.info(
                 f"Transcription complete: words={len(all_words)}, segments={len(all_segments)}, "
-                f"lang={detected_lang} ({lang_prob*100:.1f}%)"
+                f"lang={detected_lang} ({lang_prob*100:.1f}%), load_time={model_load_duration}s, infer_time={inference_duration}s"
             )
 
             return {
                 "model": self.model_size,
+                "model_cached": was_cached,
+                "model_load_duration": model_load_duration,
+                "inference_duration": inference_duration,
+                "total_duration": total_duration,
                 "language": detected_lang,
                 "language_probability": lang_prob,
                 "duration": duration,
@@ -193,6 +244,7 @@ class TranscriptionEngine:
         self,
         project_id: str,
         language: Optional[str] = None,
+        on_progress: Optional[Callable[[str, int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """Orchestrate transcription for a project, ensuring audio exists and persisting records."""
         with get_db_connection() as conn:
@@ -208,67 +260,126 @@ class TranscriptionEngine:
         project_dir = settings.projects_dir / project_id
         audio_file = project_dir / "audio_16k.wav"
 
-        # If 16kHz mono audio is not yet extracted, extract it now via FFmpeg
-        if not audio_file.exists():
-            source_video = Path(project_row["source_file_path"]).resolve()
-            logger.info(f"Audio not yet extracted for project {project_id}. Running FFmpeg extraction first...")
-            ffmpeg_engine.extract_audio(source_video, audio_file)
+        job_id = f"job_tr_{project_id}_{int(time.time())}"
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Execute transcription
-        transcript_data = self.transcribe_file(audio_file, language=language)
-
-        # Write immutable artifact transcript.json into projects/{project_id}/ atomically
-        transcript_json_path = project_dir / "transcript.json"
-        artifact_payload = {
-            "project_id": project_id,
-            "created_at": datetime.utcnow().isoformat(),
-            **transcript_data,
-        }
-        self.write_transcript_atomically(transcript_json_path, artifact_payload)
-
-        # Persist summary in SQLite transcripts table
-        now_iso = datetime.utcnow().isoformat()
-        transcript_id = f"tr_{project_id}"
-
+        # Create/Record job in SQLite jobs table
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO transcripts (
-                    id, project_id, raw_text, words_json_path, language,
-                    language_probability, model_name, word_count, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    raw_text=excluded.raw_text,
-                    words_json_path=excluded.words_json_path,
-                    language=excluded.language,
-                    language_probability=excluded.language_probability,
-                    model_name=excluded.model_name,
-                    word_count=excluded.word_count,
-                    status=excluded.status,
-                    created_at=excluded.created_at;
+                INSERT INTO jobs (id, project_id, stage, status, progress_percent, log_output, started_at)
+                VALUES (?, ?, 'TRANSCRIPTION', 'RUNNING', 15, 'Preparing audio...', ?);
                 """,
-                (
-                    transcript_id,
-                    project_id,
-                    transcript_data["raw_text"],
-                    str(transcript_json_path.resolve()),
-                    transcript_data["language"],
-                    transcript_data["language_probability"],
-                    transcript_data["model"],
-                    transcript_data["word_count"],
-                    "COMPLETED",
-                    now_iso,
-                ),
-            )
-            cursor.execute(
-                "UPDATE projects SET status = 'TRANSCRIBED', updated_at = ? WHERE id = ?;",
-                (now_iso, project_id),
+                (job_id, project_id, now_iso),
             )
             conn.commit()
 
-        logger.info(f"Persisted transcript for project {project_id} (word_count={transcript_data['word_count']})")
-        return artifact_payload
+        if on_progress:
+            on_progress("AUDIO_PREP", 15, {})
+
+        try:
+            # If 16kHz mono audio is not yet extracted, extract it now via FFmpeg
+            if not audio_file.exists():
+                source_video = Path(project_row["source_file_path"]).resolve()
+                logger.info(f"Audio not yet extracted for project {project_id}. Running FFmpeg extraction first...")
+                ffmpeg_engine.extract_audio(source_video, audio_file)
+
+            # Execute transcription with progress forwarding
+            transcript_data = self.transcribe_file(audio_file, language=language, on_progress=on_progress)
+
+            # Write immutable artifact transcript.json into projects/{project_id}/ atomically
+            transcript_json_path = project_dir / "transcript.json"
+            now_iso = datetime.now(timezone.utc).isoformat()
+            artifact_payload = {
+                "project_id": project_id,
+                "created_at": now_iso,
+                **transcript_data,
+            }
+            self.write_transcript_atomically(transcript_json_path, artifact_payload)
+
+            # Persist summary in SQLite transcripts table
+            transcript_id = f"tr_{project_id}"
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO transcripts (
+                        id, project_id, raw_text, words_json_path, language,
+                        language_probability, model_name, word_count, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        raw_text=excluded.raw_text,
+                        words_json_path=excluded.words_json_path,
+                        language=excluded.language,
+                        language_probability=excluded.language_probability,
+                        model_name=excluded.model_name,
+                        word_count=excluded.word_count,
+                        status=excluded.status,
+                        created_at=excluded.created_at;
+                    """,
+                    (
+                        transcript_id,
+                        project_id,
+                        transcript_data["raw_text"],
+                        str(transcript_json_path.resolve()),
+                        transcript_data["language"],
+                        transcript_data["language_probability"],
+                        transcript_data["model"],
+                        transcript_data["word_count"],
+                        "COMPLETED",
+                        now_iso,
+                    ),
+                )
+                cursor.execute(
+                    "UPDATE projects SET status = 'TRANSCRIBED', updated_at = ? WHERE id = ?;",
+                    (now_iso, project_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'COMPLETED', progress_percent = 100,
+                        log_output = 'Transcription completed successfully.', finished_at = ?
+                    WHERE id = ?;
+                    """,
+                    (now_iso, job_id),
+                )
+                conn.commit()
+
+            logger.info(f"Persisted transcript for project {project_id} (word_count={transcript_data['word_count']})")
+
+            if on_progress:
+                on_progress(
+                    "COMPLETED",
+                    100,
+                    {
+                        "model_load_duration": transcript_data.get("model_load_duration"),
+                        "inference_duration": transcript_data.get("inference_duration"),
+                        "total_duration": transcript_data.get("total_duration"),
+                        "word_count": transcript_data.get("word_count"),
+                        "language": transcript_data.get("language"),
+                        "language_probability": transcript_data.get("language_probability"),
+                    },
+                )
+
+            return artifact_payload
+
+        except Exception as e:
+            fail_iso = datetime.now(timezone.utc).isoformat()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'FAILED', progress_percent = 0, error_message = ?, finished_at = ?
+                    WHERE id = ?;
+                    """,
+                    (str(e), fail_iso, job_id),
+                )
+                conn.commit()
+            if on_progress:
+                on_progress("FAILED", 0, {"error": str(e)})
+            raise
 
     def transcribe_audio(
         self,
@@ -291,12 +402,12 @@ class TranscriptionEngine:
 
             artifact_payload = {
                 "project_id": project_id,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 **transcript_data,
             }
             self.write_transcript_atomically(transcript_json_path, artifact_payload)
 
-            now_iso = datetime.utcnow().isoformat()
+            now_iso = datetime.now(timezone.utc).isoformat()
             transcript_id = f"tr_{project_id}"
 
             with get_db_connection() as conn:

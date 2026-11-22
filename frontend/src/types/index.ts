@@ -79,6 +79,13 @@ export interface Transcript {
 export interface TranscriptionStatus {
   project_id: string;
   status: string;
+  phase?: string;
+  model: string;
+  model_cached?: boolean;
+  progress_percent: number;
+  model_load_duration?: number | null;
+  inference_duration?: number | null;
+  total_duration?: number | null;
   language: string | null;
   language_probability: number | null;
   word_count: number;

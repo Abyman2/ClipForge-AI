@@ -9,7 +9,9 @@ from clipforge.core.config import settings
 from clipforge.db.models import ProjectModel, TranscriptModel
 from clipforge.db.session import get_db_connection, init_db, reconcile_interrupted_jobs
 from clipforge.media.transcribe import (
+    AudioCorruptedError,
     AudioFileNotFoundError,
+    ModelLoadError,
     TranscriptionEngine,
     TranscriptionError,
 )
@@ -368,4 +370,121 @@ def test_startup_reconciliation_marks_transcribing_as_failed():
         job_row = cursor.fetchone()
         assert job_row is not None
         assert "interrupted by server restart" in job_row["error_message"].lower()
+
+
+def test_transcribe_audio_corrupted_file(tmp_path: Path):
+    """Verify AudioCorruptedError is raised when audio file has fewer than 44 bytes."""
+    engine = TranscriptionEngine(model_size="tiny")
+    corrupt_audio = tmp_path / "corrupt.wav"
+    corrupt_audio.write_bytes(b"RIFF_TOO_SHORT")  # 14 bytes (< 44)
+    with pytest.raises(AudioCorruptedError) as exc_info:
+        engine.transcribe_file(corrupt_audio)
+    assert "corrupted" in str(exc_info.value).lower()
+
+
+def test_model_caching_and_status():
+    """Verify is_model_loaded reflects memory cache and get_model_status provides telemetry."""
+    engine = TranscriptionEngine(model_size="tiny", cpu_threads=4)
+    assert not engine.is_model_loaded
+
+    status_before = engine.get_model_status()
+    assert status_before["model_size"] == "tiny"
+    assert status_before["cpu_threads"] == 4
+    assert not status_before["is_loaded"]
+
+    # Simulate model loading
+    mock_model = MagicMock()
+    with patch.object(engine, "_load_model", return_value=mock_model):
+        engine._model = mock_model
+        assert engine.is_model_loaded
+        status_after = engine.get_model_status()
+        assert status_after["is_loaded"]
+
+
+def test_model_load_failure():
+    """Verify ModelLoadError is raised when faster-whisper fails to initialize."""
+    engine = TranscriptionEngine(model_size="non_existent_model_xyz")
+    with patch("faster_whisper.WhisperModel", side_effect=RuntimeError("Out of memory")):
+        with pytest.raises(ModelLoadError) as exc_info:
+            engine._load_model()
+        assert "failed to load whisper model" in str(exc_info.value).lower()
+
+
+def test_transcription_engine_progress_callback(tmp_path: Path):
+    """Verify on_progress callback receives LOADING_MODEL and TRANSCRIBING phases."""
+    engine = TranscriptionEngine(model_size="tiny")
+    audio_file = tmp_path / "audio.wav"
+    audio_file.write_bytes(b"RIFF" + b"\x00" * 40)
+
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], MockInfo())
+
+    phases_recorded = []
+
+    def progress_tracker(phase, percent, extra):
+        phases_recorded.append((phase, percent))
+
+    with patch.object(engine, "get_model", return_value=mock_model):
+        result = engine.transcribe_file(audio_file, on_progress=progress_tracker)
+
+    assert ("LOADING_MODEL", 35) in phases_recorded
+    assert ("TRANSCRIBING", 70) in phases_recorded
+    assert "model_load_duration" in result
+    assert "inference_duration" in result
+    assert "total_duration" in result
+
+
+def test_transcribe_project_creates_and_completes_job_record(tmp_path: Path):
+    """Verify transcribe_project records execution in SQLite jobs table."""
+    project_id = "proj_job_audit_test"
+    project_dir = settings.get_project_dir(project_id)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    audio_file = project_dir / "audio_16k.wav"
+    audio_file.write_bytes(b"RIFF" + b"\x00" * 40)
+
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO projects (id, title, source_file_path, duration_seconds, width, height,
+                                  fps, video_codec, audio_codec, has_audio, file_size_bytes,
+                                  container_format, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                "Job Audit Project",
+                str(project_dir / "video.mp4"),
+                5.0,
+                1920,
+                1080,
+                30.0,
+                "h264",
+                "aac",
+                1,
+                2048,
+                "mp4",
+                "AUDIO_READY",
+            ),
+        )
+        conn.commit()
+
+    engine = TranscriptionEngine(model_size="tiny")
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], MockInfo())
+
+    with patch.object(engine, "get_model", return_value=mock_model):
+        engine.transcribe_project(project_id)
+
+    # Check jobs table
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jobs WHERE project_id = ? AND stage = 'TRANSCRIPTION';", (project_id,))
+        job_row = cursor.fetchone()
+
+        assert job_row is not None
+        assert job_row["status"] == "COMPLETED"
+        assert job_row["progress_percent"] == 100
+        assert job_row["started_at"] is not None
+        assert job_row["finished_at"] is not None
+        assert "completed successfully" in job_row["log_output"].lower()
 

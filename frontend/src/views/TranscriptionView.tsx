@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   FileText,
   RefreshCw,
@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Volume2,
   VolumeX,
+  Zap,
 } from 'lucide-react';
 import { Project, Transcript, TranscriptionStatus } from '../types';
 
@@ -32,6 +33,14 @@ export const TranscriptionView: React.FC<TranscriptionViewProps> = ({
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [selectedWordIndex, setSelectedWordIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [elapsedSec, setElapsedSec] = useState<number>(0);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
 
   const fetchTranscript = async (projectId: string) => {
     try {
@@ -54,13 +63,15 @@ export const TranscriptionView: React.FC<TranscriptionViewProps> = ({
         if (res.ok) {
           const status: TranscriptionStatus = await res.json();
           setTranscriptionStatus(status);
-          if (status.status === 'TRANSCRIBED') {
+          if (status.status === 'COMPLETED' || status.status === 'TRANSCRIBED') {
             clearInterval(interval);
+            if (timerRef.current) clearInterval(timerRef.current);
             setTranscribing(false);
             fetchTranscript(projectId);
             onProjectsChange();
           } else if (status.status === 'FAILED') {
             clearInterval(interval);
+            if (timerRef.current) clearInterval(timerRef.current);
             setTranscribing(false);
             setError(status.error || 'Transcription failed');
             onProjectsChange();
@@ -68,9 +79,10 @@ export const TranscriptionView: React.FC<TranscriptionViewProps> = ({
         }
       } catch {
         clearInterval(interval);
+        if (timerRef.current) clearInterval(timerRef.current);
         setTranscribing(false);
       }
-    }, 1500);
+    }, 1200);
   };
 
   const handleTranscribe = async (projectId: string) => {
@@ -79,6 +91,14 @@ export const TranscriptionView: React.FC<TranscriptionViewProps> = ({
       setError(null);
       setTranscript(null);
       setTranscriptionStatus(null);
+      setElapsedSec(0);
+
+      if (timerRef.current) clearInterval(timerRef.current);
+      const startT = Date.now();
+      timerRef.current = setInterval(() => {
+        setElapsedSec(Math.round((Date.now() - startT) / 1000));
+      }, 500);
+
       const res = await fetch(`/api/projects/${projectId}/transcribe`, { method: 'POST' });
       if (!res.ok) {
         const err = await res.json();
@@ -86,6 +106,7 @@ export const TranscriptionView: React.FC<TranscriptionViewProps> = ({
       }
       pollTranscription(projectId);
     } catch (err: unknown) {
+      if (timerRef.current) clearInterval(timerRef.current);
       const message = err instanceof Error ? err.message : 'Transcription failed';
       setError(message);
       setTranscribing(false);
@@ -262,13 +283,68 @@ export const TranscriptionView: React.FC<TranscriptionViewProps> = ({
 
           {/* Transcribing Progress Banner */}
           {transcribing && (
-            <div className="p-4 rounded-xl bg-amber-400/5 border border-amber-400/20 flex items-center space-x-3 text-xs text-amber-300">
-              <RefreshCw className="w-4 h-4 animate-spin text-amber-400 shrink-0" />
+            <div className="p-5 rounded-2xl bg-amber-400/5 border border-amber-400/20 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center space-x-3 text-xs text-amber-300">
+                  <RefreshCw className="w-4 h-4 animate-spin text-amber-400 shrink-0" />
+                  <span className="font-medium">
+                    {transcriptionStatus?.phase === 'AUDIO_PREP'
+                      ? 'Preparing & validating 16kHz audio stream...'
+                      : transcriptionStatus?.phase === 'LOADING_MODEL'
+                      ? transcriptionStatus?.model_cached
+                        ? 'Reusing cached faster-whisper CTranslate2 model from memory...'
+                        : 'Initializing faster-whisper CTranslate2 model on CPU...'
+                      : transcriptionStatus?.phase === 'TRANSCRIBING'
+                      ? 'Transcribing speech with 4 CPU threads (Whisper tiny int8). Generating word-level timestamps...'
+                      : 'Processing speech with faster-whisper...'}
+                  </span>
+                </div>
+                <div className="flex items-center space-x-2 text-xs font-mono text-slate-400 self-end sm:self-auto">
+                  <span>
+                    Elapsed: <strong className="text-amber-400">{elapsedSec}s</strong>
+                  </span>
+                  <span>•</span>
+                  <span>{transcriptionStatus?.progress_percent || 15}%</span>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-amber-500 to-amber-300 transition-all duration-300"
+                  style={{ width: `${transcriptionStatus?.progress_percent || 15}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Performance Telemetry Banner (when available) */}
+          {transcriptionStatus && (transcriptionStatus.total_duration != null || transcriptionStatus.inference_duration != null) && (
+            <div className="flex flex-wrap items-center gap-3 p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs font-mono text-slate-300">
+              <div className="flex items-center space-x-1.5 text-amber-400 font-semibold">
+                <Zap className="w-3.5 h-3.5" />
+                <span>CPU Performance:</span>
+              </div>
               <span>
-                {transcriptionStatus?.is_running
-                  ? 'Transcribing speech with 4 CPU threads (Whisper tiny int8). Generating word-level timestamps...'
-                  : 'Initializing faster-whisper CTranslate2 model...'}
+                Total: <strong className="text-white">{transcriptionStatus.total_duration ?? '–'}s</strong>
               </span>
+              <span>•</span>
+              <span>
+                Model Load: <strong className="text-white">{transcriptionStatus.model_load_duration ?? '0.00'}s</strong>{' '}
+                {transcriptionStatus.model_cached ? '(Cached in RAM)' : ''}
+              </span>
+              <span>•</span>
+              <span>
+                Inference: <strong className="text-white">{transcriptionStatus.inference_duration ?? '–'}s</strong>
+              </span>
+              {transcriptionStatus.inference_duration && selectedProject?.duration_seconds && (
+                <>
+                  <span>•</span>
+                  <span className="text-emerald-400 font-semibold">
+                    {(selectedProject.duration_seconds / Math.max(transcriptionStatus.inference_duration, 0.01)).toFixed(1)}x real-time
+                  </span>
+                </>
+              )}
             </div>
           )}
 
